@@ -1,0 +1,4 @@
+pyodbc
+snowflake-connector-python
+pandas
+tabulate

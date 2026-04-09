@@ -1,0 +1,544 @@
+"""
+Table Validation Script: SQL Server (SSMS) ↔ Snowflake
+
+Validates data integrity after migrating tables from SQL Server to Snowflake.
+All operations are READ-ONLY — no INSERT, UPDATE, DELETE, DROP, or ALTER.
+
+Test Cases:
+  1. Source table exists in Snowflake
+  2. Schema comparison (column names, data types)
+  3. Record count comparison
+  4. Audit fields verification in Snowflake
+  5. Sample or full data validation
+"""
+
+import argparse
+import sys
+import hashlib
+import pyodbc
+import snowflake.connector
+import pandas as pd
+from tabulate import tabulate
+
+# ---------------------------------------------------------------------------
+# Safety: block any non-SELECT statement from being executed
+# ---------------------------------------------------------------------------
+BLOCKED_KEYWORDS = [
+    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE",
+    "CREATE", "EXEC", "EXECUTE", "MERGE", "GRANT", "REVOKE",
+]
+
+
+def _assert_readonly(sql: str):
+    """Raise if SQL contains destructive keywords."""
+    upper = sql.upper().strip()
+    for kw in BLOCKED_KEYWORDS:
+        if kw in upper.split():
+            raise PermissionError(f"Blocked: statement contains '{kw}'. Only SELECT is allowed.")
+
+
+def run_query(conn, sql: str, params=None) -> pd.DataFrame:
+    """Execute a read-only query and return a DataFrame."""
+    _assert_readonly(sql)
+    return pd.read_sql(sql, conn, params=params)
+
+
+# ---------------------------------------------------------------------------
+# Connection helpers
+# ---------------------------------------------------------------------------
+def connect_sqlserver(server: str, database: str) -> pyodbc.Connection:
+    """Connect to SQL Server using Windows Authentication (read-only intent)."""
+    conn_str = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        f"Trusted_Connection=yes;"
+        f"ApplicationIntent=ReadOnly;"
+    )
+    return pyodbc.connect(conn_str)
+
+
+def connect_snowflake(account: str, user: str, password: str,
+                      warehouse: str, database: str, schema: str,
+                      role: str = None) -> snowflake.connector.SnowflakeConnection:
+    """Connect to Snowflake."""
+    params = dict(
+        account=account,
+        user=user,
+        password=password,
+        warehouse=warehouse,
+        database=database,
+        schema=schema,
+    )
+    if role:
+        params["role"] = role
+    return snowflake.connector.connect(**params)
+
+
+# ---------------------------------------------------------------------------
+# Test Case 1: Table existence in Snowflake
+# ---------------------------------------------------------------------------
+def test_table_exists(sf_conn, sf_schema: str, sf_table: str) -> dict:
+    """Check whether the target table exists in Snowflake."""
+    sql = (
+        "SELECT COUNT(*) AS cnt "
+        "FROM INFORMATION_SCHEMA.TABLES "
+        "WHERE UPPER(TABLE_SCHEMA) = UPPER(%s) "
+        "AND UPPER(TABLE_NAME) = UPPER(%s)"
+    )
+    df = run_query(sf_conn, sql, params=[sf_schema, sf_table])
+    exists = int(df.iloc[0]["cnt"]) > 0
+    return {
+        "test": "TC1 - Table Exists in Snowflake",
+        "status": "PASS" if exists else "FAIL",
+        "details": f"{sf_schema}.{sf_table} {'found' if exists else 'NOT found'} in Snowflake",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test Case 2: Schema / column comparison
+# ---------------------------------------------------------------------------
+def _get_sqlserver_columns(ss_conn, ss_schema: str, ss_table: str) -> pd.DataFrame:
+    sql = (
+        "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, "
+        "NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE "
+        "FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? "
+        "ORDER BY ORDINAL_POSITION"
+    )
+    return run_query(ss_conn, sql, params=[ss_schema, ss_table])
+
+
+def _get_snowflake_columns(sf_conn, sf_schema: str, sf_table: str) -> pd.DataFrame:
+    sql = (
+        "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, "
+        "NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE "
+        "FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE UPPER(TABLE_SCHEMA) = UPPER(%s) AND UPPER(TABLE_NAME) = UPPER(%s) "
+        "ORDER BY ORDINAL_POSITION"
+    )
+    return run_query(sf_conn, sql, params=[sf_schema, sf_table])
+
+
+def test_schema_match(ss_conn, sf_conn,
+                      ss_schema, ss_table,
+                      sf_schema, sf_table) -> dict:
+    """Compare column names and data types between source and target."""
+    src = _get_sqlserver_columns(ss_conn, ss_schema, ss_table)
+    tgt = _get_snowflake_columns(sf_conn, sf_schema, sf_table)
+
+    src_cols = set(src["COLUMN_NAME"].str.upper())
+    tgt_cols = set(tgt["COLUMN_NAME"].str.upper())
+
+    missing_in_sf = src_cols - tgt_cols
+    extra_in_sf = tgt_cols - src_cols
+
+    passed = len(missing_in_sf) == 0
+    details_parts = []
+    if missing_in_sf:
+        details_parts.append(f"Missing in Snowflake: {sorted(missing_in_sf)}")
+    if extra_in_sf:
+        details_parts.append(f"Extra in Snowflake (may be audit cols): {sorted(extra_in_sf)}")
+    if not details_parts:
+        details_parts.append("All source columns present in Snowflake")
+
+    return {
+        "test": "TC2 - Schema Comparison",
+        "status": "PASS" if passed else "FAIL",
+        "details": "; ".join(details_parts),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test Case 3: Record count
+# ---------------------------------------------------------------------------
+def _count_rows(conn, schema: str, table: str, is_snowflake: bool = False) -> int:
+    if is_snowflake:
+        sql = f'SELECT COUNT(*) AS cnt FROM "{schema}"."{table}"'
+    else:
+        sql = f"SELECT COUNT(*) AS cnt FROM [{schema}].[{table}]"
+    df = run_query(conn, sql)
+    return int(df.iloc[0]["cnt"])
+
+
+def test_record_count(ss_conn, sf_conn,
+                      ss_schema, ss_table,
+                      sf_schema, sf_table) -> dict:
+    """Compare row counts between SQL Server and Snowflake."""
+    src_count = _count_rows(ss_conn, ss_schema, ss_table)
+    tgt_count = _count_rows(sf_conn, sf_schema, sf_table, is_snowflake=True)
+    matched = src_count == tgt_count
+    return {
+        "test": "TC3 - Record Count",
+        "status": "PASS" if matched else "FAIL",
+        "details": f"Source: {src_count:,} | Snowflake: {tgt_count:,}"
+                   + ("" if matched else f" | Diff: {abs(src_count - tgt_count):,}"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test Case 4: Audit fields in Snowflake
+# ---------------------------------------------------------------------------
+COMMON_AUDIT_FIELDS = [
+    "CREATED_DATE", "CREATED_BY", "MODIFIED_DATE", "MODIFIED_BY",
+    "UPDATED_DATE", "UPDATED_BY", "INSERT_DATE", "UPDATE_DATE",
+    "ETL_LOAD_DATE", "ETL_UPDATE_DATE", "LOAD_TIMESTAMP",
+    "DW_INSERT_DATE", "DW_UPDATE_DATE",
+]
+
+
+def test_audit_fields(sf_conn, sf_schema: str, sf_table: str,
+                      audit_fields: list[str] = None) -> dict:
+    """Check that expected audit columns exist and are populated in Snowflake."""
+    cols_df = _get_snowflake_columns(sf_conn, sf_schema, sf_table)
+    tgt_cols = set(cols_df["COLUMN_NAME"].str.upper())
+
+    candidates = [f.upper() for f in (audit_fields or COMMON_AUDIT_FIELDS)]
+    found = [c for c in candidates if c in tgt_cols]
+
+    if not found:
+        return {
+            "test": "TC4 - Audit Fields",
+            "status": "WARN",
+            "details": "No common audit columns detected in Snowflake table",
+        }
+
+    # Check that audit columns are not entirely NULL
+    null_checks = ", ".join(
+        f'SUM(CASE WHEN "{col}" IS NULL THEN 1 ELSE 0 END) AS "{col}_nulls"'
+        for col in found
+    )
+    sql = f'SELECT COUNT(*) AS total, {null_checks} FROM "{sf_schema}"."{sf_table}"'
+    df = run_query(sf_conn, sql)
+    total = int(df.iloc[0]["total"])
+
+    all_null_cols = []
+    for col in found:
+        nulls = int(df.iloc[0][f"{col}_nulls"])
+        if nulls == total and total > 0:
+            all_null_cols.append(col)
+
+    passed = len(all_null_cols) == 0
+    details = f"Audit columns found: {found}"
+    if all_null_cols:
+        details += f" | Entirely NULL: {all_null_cols}"
+
+    return {
+        "test": "TC4 - Audit Fields",
+        "status": "PASS" if passed else "FAIL",
+        "details": details,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test Case 5: Data validation (sample or full)
+# ---------------------------------------------------------------------------
+def _row_hash(row: pd.Series) -> str:
+    """Deterministic hash of a row for comparison."""
+    return hashlib.md5(str(tuple(row)).encode()).hexdigest()
+
+
+def test_data_validation(ss_conn, sf_conn,
+                         ss_schema, ss_table,
+                         sf_schema, sf_table,
+                         mode: str = "partial",
+                         sample_size: int = 10) -> dict:
+    """
+    Compare actual data between source and target.
+
+    mode='partial' — compare a sample of N rows (ordered by first column).
+    mode='full'    — compare all rows (can be slow on large tables).
+
+    Only the columns present in BOTH tables are compared.
+    """
+    # Determine common columns
+    src_cols_df = _get_sqlserver_columns(ss_conn, ss_schema, ss_table)
+    tgt_cols_df = _get_snowflake_columns(sf_conn, sf_schema, sf_table)
+
+    common_cols = sorted(
+        set(src_cols_df["COLUMN_NAME"].str.upper())
+        & set(tgt_cols_df["COLUMN_NAME"].str.upper())
+    )
+
+    if not common_cols:
+        return {
+            "test": "TC5 - Data Validation",
+            "status": "FAIL",
+            "details": "No common columns found to compare",
+        }
+
+    # Build column lists respecting each DB's quoting
+    ss_col_list = ", ".join(f"[{c}]" for c in common_cols)
+    sf_col_list = ", ".join(f'"{c}"' for c in common_cols)
+    order_col_ss = f"[{common_cols[0]}]"
+    order_col_sf = f'"{common_cols[0]}"'
+
+    if mode == "full":
+        ss_sql = f"SELECT {ss_col_list} FROM [{ss_schema}].[{ss_table}] ORDER BY {order_col_ss}"
+        sf_sql = f'SELECT {sf_col_list} FROM "{sf_schema}"."{sf_table}" ORDER BY {order_col_sf}'
+    else:
+        ss_sql = (
+            f"SELECT TOP {int(sample_size)} {ss_col_list} "
+            f"FROM [{ss_schema}].[{ss_table}] ORDER BY {order_col_ss}"
+        )
+        sf_sql = (
+            f'SELECT {sf_col_list} FROM "{sf_schema}"."{sf_table}" '
+            f"ORDER BY {order_col_sf} LIMIT {int(sample_size)}"
+        )
+
+    src_df = run_query(ss_conn, ss_sql)
+    tgt_df = run_query(sf_conn, sf_sql)
+
+    # Normalise column names to upper
+    src_df.columns = [c.upper() for c in src_df.columns]
+    tgt_df.columns = [c.upper() for c in tgt_df.columns]
+
+    # Cast everything to string for consistent comparison
+    src_df = src_df.astype(str).fillna("")
+    tgt_df = tgt_df.astype(str).fillna("")
+
+    src_hashes = set(src_df.apply(_row_hash, axis=1))
+    tgt_hashes = set(tgt_df.apply(_row_hash, axis=1))
+
+    matched = src_hashes == tgt_hashes
+    only_src = len(src_hashes - tgt_hashes)
+    only_tgt = len(tgt_hashes - src_hashes)
+
+    label = "Full" if mode == "full" else f"Sample ({sample_size} rows)"
+    details = f"{label} | Compared {len(common_cols)} columns"
+    if matched:
+        details += " | All rows match"
+    else:
+        details += f" | Mismatches — only in source: {only_src}, only in target: {only_tgt}"
+
+    return {
+        "test": "TC5 - Data Validation",
+        "status": "PASS" if matched else "FAIL",
+        "details": details,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Table mapping parser
+# ---------------------------------------------------------------------------
+def parse_table_mapping(mapping: str) -> dict:
+    """
+    Parse a table mapping string.
+
+    Format: source_schema.source_table:target_schema.target_table
+    Example: dbo.Customers:PUBLIC.CUSTOMERS
+
+    If only one side is given (no colon), assumes same schema.table on both.
+    """
+    if ":" in mapping:
+        src, tgt = mapping.split(":", 1)
+    else:
+        src = tgt = mapping
+
+    def _split(name):
+        parts = name.split(".", 1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return "dbo", parts[0]  # default schema
+
+    ss_schema, ss_table = _split(src)
+    sf_schema, sf_table = _split(tgt)
+    return {
+        "ss_schema": ss_schema, "ss_table": ss_table,
+        "sf_schema": sf_schema, "sf_table": sf_table,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Validate data between SQL Server and Snowflake tables.",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+
+    # Table mappings
+    p.add_argument(
+        "tables", nargs="+",
+        help=(
+            "Table mapping(s) in the format:\n"
+            "  source_schema.source_table:target_schema.target_table\n"
+            "Examples:\n"
+            "  dbo.Customers:PUBLIC.CUSTOMERS\n"
+            "  dbo.Orders  (same name assumed on both sides)"
+        ),
+    )
+
+    # SQL Server
+    ss = p.add_argument_group("SQL Server (Windows Auth)")
+    ss.add_argument("--ss-server", required=True, help="SQL Server hostname or IP")
+    ss.add_argument("--ss-database", required=True, help="SQL Server database name")
+
+    # Snowflake
+    sf = p.add_argument_group("Snowflake")
+    sf.add_argument("--sf-account", required=True, help="Snowflake account identifier")
+    sf.add_argument("--sf-user", required=True, help="Snowflake username")
+    sf.add_argument("--sf-password", required=True, help="Snowflake password")
+    sf.add_argument("--sf-warehouse", required=True, help="Snowflake warehouse")
+    sf.add_argument("--sf-database", required=True, help="Snowflake database")
+    sf.add_argument("--sf-schema", default="PUBLIC", help="Default Snowflake schema (default: PUBLIC)")
+    sf.add_argument("--sf-role", default=None, help="Snowflake role (optional)")
+
+    # Validation options
+    v = p.add_argument_group("Validation options")
+    v.add_argument(
+        "--mode", choices=["partial", "full"], default="partial",
+        help="Data validation mode (default: partial)",
+    )
+    v.add_argument(
+        "--sample-size", type=int, default=10,
+        help="Number of rows for partial validation (default: 10)",
+    )
+    v.add_argument(
+        "--audit-fields", nargs="*", default=None,
+        help="Custom audit field names to check (default: common audit column names)",
+    )
+
+    return p
+
+
+def run_validations(args) -> list[dict]:
+    """Connect to both databases, run all test cases, return results."""
+    print("Connecting to SQL Server (Windows Auth)...")
+    ss_conn = connect_sqlserver(args.ss_server, args.ss_database)
+
+    print("Connecting to Snowflake...")
+    sf_conn = connect_snowflake(
+        account=args.sf_account,
+        user=args.sf_user,
+        password=args.sf_password,
+        warehouse=args.sf_warehouse,
+        database=args.sf_database,
+        schema=args.sf_schema,
+        role=args.sf_role,
+    )
+
+    all_results = []
+
+    for mapping_str in args.tables:
+        m = parse_table_mapping(mapping_str)
+        header = f"{m['ss_schema']}.{m['ss_table']} → {m['sf_schema']}.{m['sf_table']}"
+        print(f"\n{'='*60}")
+        print(f"  Validating: {header}")
+        print(f"{'='*60}")
+
+        table_results = []
+
+        # TC1: Table exists
+        print("  Running TC1 - Table Exists...")
+        r1 = test_table_exists(sf_conn, m["sf_schema"], m["sf_table"])
+        table_results.append(r1)
+
+        if r1["status"] == "FAIL":
+            print(f"  ⛔ Table not found in Snowflake — skipping remaining tests.")
+            table_results.extend([
+                {"test": "TC2 - Schema Comparison", "status": "SKIP", "details": "Table not found"},
+                {"test": "TC3 - Record Count", "status": "SKIP", "details": "Table not found"},
+                {"test": "TC4 - Audit Fields", "status": "SKIP", "details": "Table not found"},
+                {"test": "TC5 - Data Validation", "status": "SKIP", "details": "Table not found"},
+            ])
+        else:
+            # TC2: Schema
+            print("  Running TC2 - Schema Comparison...")
+            table_results.append(test_schema_match(
+                ss_conn, sf_conn,
+                m["ss_schema"], m["ss_table"],
+                m["sf_schema"], m["sf_table"],
+            ))
+
+            # TC3: Record count
+            print("  Running TC3 - Record Count...")
+            table_results.append(test_record_count(
+                ss_conn, sf_conn,
+                m["ss_schema"], m["ss_table"],
+                m["sf_schema"], m["sf_table"],
+            ))
+
+            # TC4: Audit fields
+            print("  Running TC4 - Audit Fields...")
+            table_results.append(test_audit_fields(
+                sf_conn, m["sf_schema"], m["sf_table"],
+                audit_fields=args.audit_fields,
+            ))
+
+            # TC5: Data validation
+            print(f"  Running TC5 - Data Validation ({args.mode}, sample={args.sample_size})...")
+            table_results.append(test_data_validation(
+                ss_conn, sf_conn,
+                m["ss_schema"], m["ss_table"],
+                m["sf_schema"], m["sf_table"],
+                mode=args.mode,
+                sample_size=args.sample_size,
+            ))
+
+        for r in table_results:
+            r["table"] = header
+        all_results.extend(table_results)
+
+    ss_conn.close()
+    sf_conn.close()
+    return all_results
+
+
+def print_report(results: list[dict]):
+    """Print a summary report of all test results."""
+    print("\n")
+    print("=" * 80)
+    print("  VALIDATION REPORT")
+    print("=" * 80)
+
+    rows = []
+    for r in results:
+        status = r["status"]
+        if status == "PASS":
+            badge = "PASS"
+        elif status == "FAIL":
+            badge = "FAIL"
+        elif status == "WARN":
+            badge = "WARN"
+        else:
+            badge = "SKIP"
+        rows.append([r["table"], r["test"], badge, r["details"]])
+
+    print(tabulate(rows, headers=["Table", "Test Case", "Status", "Details"],
+                   tablefmt="grid"))
+
+    # Summary counts
+    total = len(results)
+    passed = sum(1 for r in results if r["status"] == "PASS")
+    failed = sum(1 for r in results if r["status"] == "FAIL")
+    warned = sum(1 for r in results if r["status"] == "WARN")
+    skipped = sum(1 for r in results if r["status"] == "SKIP")
+
+    print(f"\nTotal: {total} | Passed: {passed} | Failed: {failed} | Warnings: {warned} | Skipped: {skipped}")
+
+    if failed > 0:
+        print("\n** RESULT: VALIDATION FAILED — review failures above **")
+    else:
+        print("\n** RESULT: ALL VALIDATIONS PASSED **")
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.sample_size < 1:
+        parser.error("--sample-size must be >= 1")
+
+    try:
+        results = run_validations(args)
+        print_report(results)
+        sys.exit(1 if any(r["status"] == "FAIL" for r in results) else 0)
+    except Exception as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

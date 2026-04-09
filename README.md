@@ -26,14 +26,43 @@ pip install -r requirements.txt
 
 ## SQL Server Authentication
 
-The script supports two authentication modes for SQL Server:
+The script supports three authentication modes for SQL Server:
 
-- **Windows Auth** (default) — omit `--ss-user` and `--ss-password`. Uses `Trusted_Connection=yes`. Requires the machine to be domain-joined.
-- **SQL Server Auth** — provide `--ss-user` and `--ss-password`. Use this when running from a non-domain machine (e.g. WSL, VMs, or cross-network).
+| Mode | Flags | When to use |
+|------|-------|-------------|
+| **Domain Auth** | `--ss-domain` + `--ss-user` | Cross-domain access — equivalent to `runas /netonly /user:DOMAIN\user`. Prompts for password securely at runtime. |
+| **SQL Server Auth** | `--ss-user` + `--ss-password` | SQL login (non-Windows account) |
+| **Windows Auth** (default) | _(none)_ | Machine is already domain-joined to the SQL Server's domain |
 
-## Usage
+### Domain Auth (recommended — equivalent to `runas /netonly`)
 
-### Basic — single table with Windows Auth
+This is the same flow as running:
+```cmd
+runas /netonly /user:mmreibc\RGaduputi "ssms.exe"
+```
+
+The script will **prompt for your password** at runtime (not visible on screen), just like `runas` does:
+
+```bash
+python validate_tables.py dbo.Customers \
+  --ss-server "SQLSERVER01" \
+  --ss-database "SalesDB" \
+  --ss-domain "mmreibc" \
+  --ss-user "RGaduputi" \
+  --sf-account "org-account" \
+  --sf-user "user" \
+  --sf-password "pass" \
+  --sf-warehouse "WH" \
+  --sf-database "SALES_DB" \
+  --sf-schema "PUBLIC"
+```
+
+```
+Password for mmreibc\RGaduputi: ********
+Connecting to SQL Server (Domain Auth (mmreibc\RGaduputi))...
+```
+
+### Windows Auth (local domain-joined machine)
 
 ```bash
 python validate_tables.py dbo.Customers \
@@ -47,7 +76,7 @@ python validate_tables.py dbo.Customers \
   --sf-schema "PUBLIC"
 ```
 
-### Basic — single table with SQL Server Auth
+### SQL Server Auth
 
 ```bash
 python validate_tables.py dbo.Customers \
@@ -160,8 +189,9 @@ python validate_tables.py dbo.Customers:PUBLIC.CUSTOMERS \
 | `tables` (positional) | Yes | — | One or more table mappings: `source_schema.table:target_schema.table` |
 | `--ss-server` | Yes | — | SQL Server hostname or IP |
 | `--ss-database` | Yes | — | SQL Server database name |
-| `--ss-user` | No | — | SQL Server username (omit for Windows Auth) |
-| `--ss-password` | No | — | SQL Server password (omit for Windows Auth) |
+| `--ss-domain` | No | — | Windows domain (e.g. `mmreibc`). Prompts for password at runtime |
+| `--ss-user` | No | — | SQL Server or domain username |
+| `--ss-password` | No | — | SQL Server password (omit with `--ss-domain`; you will be prompted) |
 | `--sf-account` | Yes | — | Snowflake account identifier |
 | `--sf-user` | Yes | — | Snowflake username |
 | `--sf-password` | Yes | — | Snowflake password |

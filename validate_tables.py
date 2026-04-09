@@ -13,6 +13,7 @@ Test Cases:
 """
 
 import argparse
+import getpass
 import sys
 import hashlib
 import pyodbc
@@ -47,12 +48,17 @@ def run_query(conn, sql: str, params=None) -> pd.DataFrame:
 # Connection helpers
 # ---------------------------------------------------------------------------
 def connect_sqlserver(server: str, database: str,
-                      username: str = None, password: str = None) -> pyodbc.Connection:
+                      domain: str = None, username: str = None,
+                      password: str = None) -> pyodbc.Connection:
     """
     Connect to SQL Server (read-only intent).
 
-    If username/password are provided, uses SQL Server Authentication.
-    Otherwise, falls back to Windows Authentication (Trusted_Connection).
+    Auth modes (checked in order):
+      1. Domain auth  — --ss-domain + --ss-user + password prompt
+                        Simulates: runas /netonly /user:DOMAIN\\user
+                        Uses UID=DOMAIN\\user with Trusted_Connection=no
+      2. SQL auth     — --ss-user + --ss-password (no domain)
+      3. Windows auth — no credentials, uses Trusted_Connection=yes
     """
     conn_str = (
         f"DRIVER={{ODBC Driver 17 for SQL Server}};"
@@ -60,9 +66,14 @@ def connect_sqlserver(server: str, database: str,
         f"DATABASE={database};"
         f"ApplicationIntent=ReadOnly;"
     )
-    if username and password:
+    if domain and username:
+        # Domain Windows auth — equivalent to runas /netonly /user:DOMAIN\user
+        conn_str += f"UID={domain}\\{username};PWD={password};"
+    elif username and password:
+        # SQL Server Authentication
         conn_str += f"UID={username};PWD={password};"
     else:
+        # Local Windows Authentication (Trusted_Connection)
         conn_str += "Trusted_Connection=yes;"
     return pyodbc.connect(conn_str)
 
@@ -383,8 +394,9 @@ def build_parser() -> argparse.ArgumentParser:
     ss = p.add_argument_group("SQL Server")
     ss.add_argument("--ss-server", required=True, help="SQL Server hostname or IP")
     ss.add_argument("--ss-database", required=True, help="SQL Server database name")
-    ss.add_argument("--ss-user", default=None, help="SQL Server username (omit for Windows Auth)")
-    ss.add_argument("--ss-password", default=None, help="SQL Server password (omit for Windows Auth)")
+    ss.add_argument("--ss-domain", default=None, help="Windows domain (e.g. mmreibc). Prompts for password at runtime")
+    ss.add_argument("--ss-user", default=None, help="SQL Server or domain username (omit for local Windows Auth)")
+    ss.add_argument("--ss-password", default=None, help="SQL Server password (omit when using --ss-domain; you will be prompted)")
 
     # Snowflake
     sf = p.add_argument_group("Snowflake")
@@ -416,10 +428,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_validations(args) -> list[dict]:
     """Connect to both databases, run all test cases, return results."""
-    auth_mode = "SQL Server Auth" if args.ss_user else "Windows Auth"
+    # Resolve SQL Server auth mode and prompt for password if needed
+    ss_password = args.ss_password
+    if args.ss_domain:
+        if not args.ss_user:
+            print("ERROR: --ss-domain requires --ss-user", file=sys.stderr)
+            sys.exit(2)
+        auth_mode = f"Domain Auth ({args.ss_domain}\\{args.ss_user})"
+        if not ss_password:
+            ss_password = getpass.getpass(f"Password for {args.ss_domain}\\{args.ss_user}: ")
+    elif args.ss_user:
+        auth_mode = "SQL Server Auth"
+    else:
+        auth_mode = "Windows Auth"
+
     print(f"Connecting to SQL Server ({auth_mode})...")
     ss_conn = connect_sqlserver(args.ss_server, args.ss_database,
-                                username=args.ss_user, password=args.ss_password)
+                                domain=args.ss_domain,
+                                username=args.ss_user, password=ss_password)
 
     print("Connecting to Snowflake...")
     sf_conn = connect_snowflake(

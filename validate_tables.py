@@ -46,15 +46,24 @@ def run_query(conn, sql: str, params=None) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
-def connect_sqlserver(server: str, database: str) -> pyodbc.Connection:
-    """Connect to SQL Server using Windows Authentication (read-only intent)."""
+def connect_sqlserver(server: str, database: str,
+                      username: str = None, password: str = None) -> pyodbc.Connection:
+    """
+    Connect to SQL Server (read-only intent).
+
+    If username/password are provided, uses SQL Server Authentication.
+    Otherwise, falls back to Windows Authentication (Trusted_Connection).
+    """
     conn_str = (
         f"DRIVER={{ODBC Driver 17 for SQL Server}};"
         f"SERVER={server};"
         f"DATABASE={database};"
-        f"Trusted_Connection=yes;"
         f"ApplicationIntent=ReadOnly;"
     )
+    if username and password:
+        conn_str += f"UID={username};PWD={password};"
+    else:
+        conn_str += "Trusted_Connection=yes;"
     return pyodbc.connect(conn_str)
 
 
@@ -371,9 +380,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # SQL Server
-    ss = p.add_argument_group("SQL Server (Windows Auth)")
+    ss = p.add_argument_group("SQL Server")
     ss.add_argument("--ss-server", required=True, help="SQL Server hostname or IP")
     ss.add_argument("--ss-database", required=True, help="SQL Server database name")
+    ss.add_argument("--ss-user", default=None, help="SQL Server username (omit for Windows Auth)")
+    ss.add_argument("--ss-password", default=None, help="SQL Server password (omit for Windows Auth)")
 
     # Snowflake
     sf = p.add_argument_group("Snowflake")
@@ -405,8 +416,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_validations(args) -> list[dict]:
     """Connect to both databases, run all test cases, return results."""
-    print("Connecting to SQL Server (Windows Auth)...")
-    ss_conn = connect_sqlserver(args.ss_server, args.ss_database)
+    auth_mode = "SQL Server Auth" if args.ss_user else "Windows Auth"
+    print(f"Connecting to SQL Server ({auth_mode})...")
+    ss_conn = connect_sqlserver(args.ss_server, args.ss_database,
+                                username=args.ss_user, password=args.ss_password)
 
     print("Connecting to Snowflake...")
     sf_conn = connect_snowflake(

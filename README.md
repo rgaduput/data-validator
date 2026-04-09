@@ -15,7 +15,7 @@ Validates data integrity after migrating tables from SQL Server (SSMS) to Snowfl
 ## Prerequisites
 
 - Python 3.10+
-- ODBC Driver 17 for SQL Server (for Windows Authentication)
+- ODBC Driver 17 for SQL Server
 - Network access to both SQL Server and Snowflake
 
 ## Installation
@@ -24,14 +24,37 @@ Validates data integrity after migrating tables from SQL Server (SSMS) to Snowfl
 pip install -r requirements.txt
 ```
 
+## SQL Server Authentication
+
+The script supports two authentication modes for SQL Server:
+
+- **Windows Auth** (default) — omit `--ss-user` and `--ss-password`. Uses `Trusted_Connection=yes`. Requires the machine to be domain-joined.
+- **SQL Server Auth** — provide `--ss-user` and `--ss-password`. Use this when running from a non-domain machine (e.g. WSL, VMs, or cross-network).
+
 ## Usage
 
-### Basic — single table (same name on both sides)
+### Basic — single table with Windows Auth
 
 ```bash
 python validate_tables.py dbo.Customers \
   --ss-server "SQLSERVER01" \
   --ss-database "SalesDB" \
+  --sf-account "org-account" \
+  --sf-user "user" \
+  --sf-password "pass" \
+  --sf-warehouse "WH" \
+  --sf-database "SALES_DB" \
+  --sf-schema "PUBLIC"
+```
+
+### Basic — single table with SQL Server Auth
+
+```bash
+python validate_tables.py dbo.Customers \
+  --ss-server "SQLSERVER01" \
+  --ss-database "SalesDB" \
+  --ss-user "sql_username" \
+  --ss-password "sql_password" \
   --sf-account "org-account" \
   --sf-user "user" \
   --sf-password "pass" \
@@ -48,6 +71,8 @@ Use `:` to map source → target when schemas or table names differ:
 python validate_tables.py "dbo.Customers:RAW.CUSTOMERS" \
   --ss-server "SQLSERVER01" \
   --ss-database "SalesDB" \
+  --ss-user "sql_username" \
+  --ss-password "sql_password" \
   --sf-account "org-account" \
   --sf-user "user" \
   --sf-password "pass" \
@@ -67,6 +92,8 @@ python validate_tables.py \
   "dbo.Products:RAW.PRODUCTS" \
   --ss-server "SQLSERVER01" \
   --ss-database "SalesDB" \
+  --ss-user "sql_username" \
+  --ss-password "sql_password" \
   --sf-account "org-account" \
   --sf-user "user" \
   --sf-password "pass" \
@@ -82,6 +109,8 @@ python validate_tables.py dbo.Customers:PUBLIC.CUSTOMERS \
   --mode full \
   --ss-server "SQLSERVER01" \
   --ss-database "SalesDB" \
+  --ss-user "sql_username" \
+  --ss-password "sql_password" \
   --sf-account "org-account" \
   --sf-user "user" \
   --sf-password "pass" \
@@ -97,6 +126,8 @@ python validate_tables.py dbo.Customers:PUBLIC.CUSTOMERS \
   --sample-size 100 \
   --ss-server "SQLSERVER01" \
   --ss-database "SalesDB" \
+  --ss-user "sql_username" \
+  --ss-password "sql_password" \
   --sf-account "org-account" \
   --sf-user "user" \
   --sf-password "pass" \
@@ -113,6 +144,8 @@ python validate_tables.py dbo.Customers:PUBLIC.CUSTOMERS \
   --audit-fields ETL_LOAD_DATE ETL_UPDATE_DATE CREATED_BY \
   --ss-server "SQLSERVER01" \
   --ss-database "SalesDB" \
+  --ss-user "sql_username" \
+  --ss-password "sql_password" \
   --sf-account "org-account" \
   --sf-user "user" \
   --sf-password "pass" \
@@ -127,6 +160,8 @@ python validate_tables.py dbo.Customers:PUBLIC.CUSTOMERS \
 | `tables` (positional) | Yes | — | One or more table mappings: `source_schema.table:target_schema.table` |
 | `--ss-server` | Yes | — | SQL Server hostname or IP |
 | `--ss-database` | Yes | — | SQL Server database name |
+| `--ss-user` | No | — | SQL Server username (omit for Windows Auth) |
+| `--ss-password` | No | — | SQL Server password (omit for Windows Auth) |
 | `--sf-account` | Yes | — | Snowflake account identifier |
 | `--sf-user` | Yes | — | Snowflake username |
 | `--sf-password` | Yes | — | Snowflake password |

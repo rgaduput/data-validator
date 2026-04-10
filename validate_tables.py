@@ -15,7 +15,6 @@ Test Cases:
 import argparse
 import getpass
 import sys
-import hashlib
 import pyodbc
 import snowflake.connector
 import pandas as pd
@@ -275,11 +274,6 @@ def test_audit_fields(sf_conn, sf_database: str, sf_schema: str, sf_table: str,
 # ---------------------------------------------------------------------------
 # Test Case 5: Data validation (sample or full)
 # ---------------------------------------------------------------------------
-def _row_hash(row: pd.Series) -> str:
-    """Deterministic hash of a row for comparison."""
-    return hashlib.md5(str(tuple(row)).encode()).hexdigest()
-
-
 def test_data_validation(ss_conn, sf_conn,
                          ss_schema, ss_table,
                          sf_database, sf_schema, sf_table,
@@ -291,15 +285,17 @@ def test_data_validation(ss_conn, sf_conn,
     mode='partial' — compare a sample of N rows (ordered by first column).
     mode='full'    — compare all rows (can be slow on large tables).
 
-    Only the columns present in BOTH tables are compared.
+    Only the columns present in BOTH tables (excluding AUDIT_*) are compared.
+    Comparison is row-by-row based on sort order, with column-level diff details.
     """
-    # Determine common columns
+    # Determine common columns (exclude AUDIT_* snowflake-only columns)
     src_cols_df = _get_sqlserver_columns(ss_conn, ss_schema, ss_table)
     tgt_cols_df = _get_snowflake_columns(sf_conn, sf_database, sf_schema, sf_table)
 
+    src_col_names = set(src_cols_df["COLUMN_NAME"].str.upper())
+    tgt_col_names = set(tgt_cols_df["COLUMN_NAME"].str.upper())
     common_cols = sorted(
-        set(src_cols_df["COLUMN_NAME"].str.upper())
-        & set(tgt_cols_df["COLUMN_NAME"].str.upper())
+        src_col_names & {c for c in tgt_col_names if not c.startswith("AUDIT_")}
     )
 
     if not common_cols:
@@ -339,23 +335,75 @@ def test_data_validation(ss_conn, sf_conn,
     src_df = src_df.astype(str).fillna("")
     tgt_df = tgt_df.astype(str).fillna("")
 
-    src_hashes = set(src_df.apply(_row_hash, axis=1))
-    tgt_hashes = set(tgt_df.apply(_row_hash, axis=1))
-
-    matched = src_hashes == tgt_hashes
-    only_src = len(src_hashes - tgt_hashes)
-    only_tgt = len(tgt_hashes - src_hashes)
-
     label = "Full" if mode == "full" else f"Sample ({sample_size} rows)"
-    details = f"{label} | Compared {len(common_cols)} columns"
-    if matched:
+
+    # Handle row count difference between fetched datasets
+    src_rows = len(src_df)
+    tgt_rows = len(tgt_df)
+    compare_rows = min(src_rows, tgt_rows)
+
+    if compare_rows == 0:
+        return {
+            "test": "TC5 - Data Validation",
+            "status": "FAIL",
+            "details": f"{label} | Source rows: {src_rows}, Target rows: {tgt_rows} — nothing to compare",
+        }
+
+    # Row-by-row, column-by-column comparison
+    mismatched_rows = 0
+    col_mismatch_count = {c: 0 for c in common_cols}  # per-column mismatch tally
+    first_example = None  # capture first mismatch for the report
+
+    for i in range(compare_rows):
+        row_has_diff = False
+        for col in common_cols:
+            src_val = src_df.iloc[i][col].strip()
+            tgt_val = tgt_df.iloc[i][col].strip()
+            if src_val != tgt_val:
+                col_mismatch_count[col] += 1
+                row_has_diff = True
+                if first_example is None:
+                    first_example = {
+                        "row": i + 1,
+                        "column": col,
+                        "source": src_val if len(src_val) <= 80 else src_val[:80] + "...",
+                        "target": tgt_val if len(tgt_val) <= 80 else tgt_val[:80] + "...",
+                    }
+        if row_has_diff:
+            mismatched_rows += 1
+
+    # Build details
+    details = f"{label} | Compared {len(common_cols)} columns x {compare_rows} rows"
+
+    if mismatched_rows == 0 and src_rows == tgt_rows:
         details += " | All rows match"
-    else:
-        details += f" | Mismatches — only in source: {only_src}, only in target: {only_tgt}"
+        return {"test": "TC5 - Data Validation", "status": "PASS", "details": details}
+
+    # Columns that have differences, sorted by mismatch count descending
+    diff_cols = {c: n for c, n in col_mismatch_count.items() if n > 0}
+    diff_cols_sorted = sorted(diff_cols.items(), key=lambda x: -x[1])
+
+    details += f" | Mismatched rows: {mismatched_rows}/{compare_rows}"
+    if src_rows != tgt_rows:
+        details += f" | Row count differs (source: {src_rows}, target: {tgt_rows})"
+
+    # Show which columns differ and how often
+    col_summary = ", ".join(f"{c} ({n})" for c, n in diff_cols_sorted[:5])
+    if len(diff_cols_sorted) > 5:
+        col_summary += f", ... +{len(diff_cols_sorted) - 5} more"
+    details += f"\n    Columns with diffs: {col_summary}"
+
+    # Show first concrete example
+    if first_example:
+        ex = first_example
+        details += (
+            f"\n    Example (row {ex['row']}, column {ex['column']}): "
+            f"source=[{ex['source']}] vs target=[{ex['target']}]"
+        )
 
     return {
         "test": "TC5 - Data Validation",
-        "status": "PASS" if matched else "FAIL",
+        "status": "FAIL",
         "details": details,
     }
 

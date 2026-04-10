@@ -41,7 +41,14 @@ def _assert_readonly(sql: str):
 def run_query(conn, sql: str, params=None) -> pd.DataFrame:
     """Execute a read-only query and return a DataFrame."""
     _assert_readonly(sql)
-    return pd.read_sql(sql, conn, params=params)
+    cursor = conn.cursor()
+    if params:
+        cursor.execute(sql, params)
+    else:
+        cursor.execute(sql)
+    columns = [desc[0].upper() for desc in cursor.description]
+    rows = cursor.fetchall()
+    return pd.DataFrame.from_records(rows, columns=columns)
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +114,7 @@ def test_table_exists(sf_conn, sf_schema: str, sf_table: str) -> dict:
         "AND UPPER(TABLE_NAME) = UPPER(%s)"
     )
     df = run_query(sf_conn, sql, params=[sf_schema, sf_table])
-    exists = int(df.iloc[0]["cnt"]) > 0
+    exists = int(df.iloc[0]["CNT"]) > 0
     return {
         "test": "TC1 - Table Exists in Snowflake",
         "status": "PASS" if exists else "FAIL",
@@ -178,7 +185,7 @@ def _count_rows(conn, schema: str, table: str, is_snowflake: bool = False) -> in
     else:
         sql = f"SELECT COUNT(*) AS cnt FROM [{schema}].[{table}]"
     df = run_query(conn, sql)
-    return int(df.iloc[0]["cnt"])
+    return int(df.iloc[0]["CNT"])
 
 
 def test_record_count(ss_conn, sf_conn,
@@ -225,16 +232,16 @@ def test_audit_fields(sf_conn, sf_schema: str, sf_table: str,
 
     # Check that audit columns are not entirely NULL
     null_checks = ", ".join(
-        f'SUM(CASE WHEN "{col}" IS NULL THEN 1 ELSE 0 END) AS "{col}_nulls"'
+        f'SUM(CASE WHEN "{col}" IS NULL THEN 1 ELSE 0 END) AS "{col}_NULLS"'
         for col in found
     )
     sql = f'SELECT COUNT(*) AS total, {null_checks} FROM "{sf_schema}"."{sf_table}"'
     df = run_query(sf_conn, sql)
-    total = int(df.iloc[0]["total"])
+    total = int(df.iloc[0]["TOTAL"])
 
     all_null_cols = []
     for col in found:
-        nulls = int(df.iloc[0][f"{col}_nulls"])
+        nulls = int(df.iloc[0][f"{col}_NULLS"])
         if nulls == total and total > 0:
             all_null_cols.append(col)
 

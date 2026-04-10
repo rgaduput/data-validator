@@ -158,17 +158,23 @@ def test_schema_match(ss_conn, sf_conn,
     src_cols = set(src["COLUMN_NAME"].str.upper())
     tgt_cols = set(tgt["COLUMN_NAME"].str.upper())
 
-    missing_in_sf = src_cols - tgt_cols
-    extra_in_sf = tgt_cols - src_cols
+    # Exclude Snowflake-only AUDIT_* columns from comparison
+    tgt_cols_filtered = {c for c in tgt_cols if not c.startswith("AUDIT_")}
+    audit_cols = tgt_cols - tgt_cols_filtered
+
+    missing_in_sf = src_cols - tgt_cols_filtered
+    extra_in_sf = tgt_cols_filtered - src_cols
 
     passed = len(missing_in_sf) == 0
     details_parts = []
     if missing_in_sf:
         details_parts.append(f"Missing in Snowflake: {sorted(missing_in_sf)}")
     if extra_in_sf:
-        details_parts.append(f"Extra in Snowflake (may be audit cols): {sorted(extra_in_sf)}")
-    if not details_parts:
-        details_parts.append("All source columns present in Snowflake")
+        details_parts.append(f"Extra in Snowflake: {sorted(extra_in_sf)}")
+    if audit_cols:
+        details_parts.append(f"AUDIT_* columns ignored: {sorted(audit_cols)}")
+    if not missing_in_sf and not extra_in_sf:
+        details_parts.insert(0, "All source columns present in Snowflake")
 
     return {
         "test": "TC2 - Schema Comparison",

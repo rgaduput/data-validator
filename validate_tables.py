@@ -105,20 +105,21 @@ def connect_snowflake(account: str, user: str, password: str,
 # ---------------------------------------------------------------------------
 # Test Case 1: Table existence in Snowflake
 # ---------------------------------------------------------------------------
-def test_table_exists(sf_conn, sf_schema: str, sf_table: str) -> dict:
+def test_table_exists(sf_conn, sf_database: str, sf_schema: str, sf_table: str) -> dict:
     """Check whether the target table exists in Snowflake."""
     sql = (
-        "SELECT COUNT(*) AS cnt "
-        "FROM INFORMATION_SCHEMA.TABLES "
-        "WHERE UPPER(TABLE_SCHEMA) = UPPER(%s) "
-        "AND UPPER(TABLE_NAME) = UPPER(%s)"
+        f'SELECT COUNT(*) AS CNT '
+        f'FROM "{sf_database}".INFORMATION_SCHEMA.TABLES '
+        f'WHERE UPPER(TABLE_SCHEMA) = UPPER(%s) '
+        f'AND UPPER(TABLE_NAME) = UPPER(%s)'
     )
     df = run_query(sf_conn, sql, params=[sf_schema, sf_table])
     exists = int(df.iloc[0]["CNT"]) > 0
+    fqn = f"{sf_database}.{sf_schema}.{sf_table}"
     return {
         "test": "TC1 - Table Exists in Snowflake",
         "status": "PASS" if exists else "FAIL",
-        "details": f"{sf_schema}.{sf_table} {'found' if exists else 'NOT found'} in Snowflake",
+        "details": f"{fqn} {'found' if exists else 'NOT found'} in Snowflake",
     }
 
 
@@ -136,23 +137,23 @@ def _get_sqlserver_columns(ss_conn, ss_schema: str, ss_table: str) -> pd.DataFra
     return run_query(ss_conn, sql, params=[ss_schema, ss_table])
 
 
-def _get_snowflake_columns(sf_conn, sf_schema: str, sf_table: str) -> pd.DataFrame:
+def _get_snowflake_columns(sf_conn, sf_database: str, sf_schema: str, sf_table: str) -> pd.DataFrame:
     sql = (
-        "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, "
-        "NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE "
-        "FROM INFORMATION_SCHEMA.COLUMNS "
-        "WHERE UPPER(TABLE_SCHEMA) = UPPER(%s) AND UPPER(TABLE_NAME) = UPPER(%s) "
-        "ORDER BY ORDINAL_POSITION"
+        f'SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, '
+        f'NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE '
+        f'FROM "{sf_database}".INFORMATION_SCHEMA.COLUMNS '
+        f'WHERE UPPER(TABLE_SCHEMA) = UPPER(%s) AND UPPER(TABLE_NAME) = UPPER(%s) '
+        f'ORDER BY ORDINAL_POSITION'
     )
     return run_query(sf_conn, sql, params=[sf_schema, sf_table])
 
 
 def test_schema_match(ss_conn, sf_conn,
                       ss_schema, ss_table,
-                      sf_schema, sf_table) -> dict:
+                      sf_database, sf_schema, sf_table) -> dict:
     """Compare column names and data types between source and target."""
     src = _get_sqlserver_columns(ss_conn, ss_schema, ss_table)
-    tgt = _get_snowflake_columns(sf_conn, sf_schema, sf_table)
+    tgt = _get_snowflake_columns(sf_conn, sf_database, sf_schema, sf_table)
 
     src_cols = set(src["COLUMN_NAME"].str.upper())
     tgt_cols = set(tgt["COLUMN_NAME"].str.upper())
@@ -179,21 +180,23 @@ def test_schema_match(ss_conn, sf_conn,
 # ---------------------------------------------------------------------------
 # Test Case 3: Record count
 # ---------------------------------------------------------------------------
-def _count_rows(conn, schema: str, table: str, is_snowflake: bool = False) -> int:
+def _count_rows(conn, schema: str, table: str, is_snowflake: bool = False,
+                sf_database: str = None) -> int:
     if is_snowflake:
-        sql = f'SELECT COUNT(*) AS cnt FROM "{schema}"."{table}"'
+        sql = f'SELECT COUNT(*) AS CNT FROM "{sf_database}"."{schema}"."{table}"'
     else:
-        sql = f"SELECT COUNT(*) AS cnt FROM [{schema}].[{table}]"
+        sql = f"SELECT COUNT(*) AS CNT FROM [{schema}].[{table}]"
     df = run_query(conn, sql)
     return int(df.iloc[0]["CNT"])
 
 
 def test_record_count(ss_conn, sf_conn,
                       ss_schema, ss_table,
-                      sf_schema, sf_table) -> dict:
+                      sf_database, sf_schema, sf_table) -> dict:
     """Compare row counts between SQL Server and Snowflake."""
     src_count = _count_rows(ss_conn, ss_schema, ss_table)
-    tgt_count = _count_rows(sf_conn, sf_schema, sf_table, is_snowflake=True)
+    tgt_count = _count_rows(sf_conn, sf_schema, sf_table, is_snowflake=True,
+                            sf_database=sf_database)
     matched = src_count == tgt_count
     return {
         "test": "TC3 - Record Count",
@@ -214,10 +217,10 @@ COMMON_AUDIT_FIELDS = [
 ]
 
 
-def test_audit_fields(sf_conn, sf_schema: str, sf_table: str,
+def test_audit_fields(sf_conn, sf_database: str, sf_schema: str, sf_table: str,
                       audit_fields: list[str] = None) -> dict:
     """Check that expected audit columns exist and are populated in Snowflake."""
-    cols_df = _get_snowflake_columns(sf_conn, sf_schema, sf_table)
+    cols_df = _get_snowflake_columns(sf_conn, sf_database, sf_schema, sf_table)
     tgt_cols = set(cols_df["COLUMN_NAME"].str.upper())
 
     candidates = [f.upper() for f in (audit_fields or COMMON_AUDIT_FIELDS)]
@@ -235,7 +238,7 @@ def test_audit_fields(sf_conn, sf_schema: str, sf_table: str,
         f'SUM(CASE WHEN "{col}" IS NULL THEN 1 ELSE 0 END) AS "{col}_NULLS"'
         for col in found
     )
-    sql = f'SELECT COUNT(*) AS total, {null_checks} FROM "{sf_schema}"."{sf_table}"'
+    sql = f'SELECT COUNT(*) AS TOTAL, {null_checks} FROM "{sf_database}"."{sf_schema}"."{sf_table}"'
     df = run_query(sf_conn, sql)
     total = int(df.iloc[0]["TOTAL"])
 
@@ -267,7 +270,7 @@ def _row_hash(row: pd.Series) -> str:
 
 def test_data_validation(ss_conn, sf_conn,
                          ss_schema, ss_table,
-                         sf_schema, sf_table,
+                         sf_database, sf_schema, sf_table,
                          mode: str = "partial",
                          sample_size: int = 10) -> dict:
     """
@@ -280,7 +283,7 @@ def test_data_validation(ss_conn, sf_conn,
     """
     # Determine common columns
     src_cols_df = _get_sqlserver_columns(ss_conn, ss_schema, ss_table)
-    tgt_cols_df = _get_snowflake_columns(sf_conn, sf_schema, sf_table)
+    tgt_cols_df = _get_snowflake_columns(sf_conn, sf_database, sf_schema, sf_table)
 
     common_cols = sorted(
         set(src_cols_df["COLUMN_NAME"].str.upper())
@@ -302,14 +305,14 @@ def test_data_validation(ss_conn, sf_conn,
 
     if mode == "full":
         ss_sql = f"SELECT {ss_col_list} FROM [{ss_schema}].[{ss_table}] ORDER BY {order_col_ss}"
-        sf_sql = f'SELECT {sf_col_list} FROM "{sf_schema}"."{sf_table}" ORDER BY {order_col_sf}'
+        sf_sql = f'SELECT {sf_col_list} FROM "{sf_database}"."{sf_schema}"."{sf_table}" ORDER BY {order_col_sf}'
     else:
         ss_sql = (
             f"SELECT TOP {int(sample_size)} {ss_col_list} "
             f"FROM [{ss_schema}].[{ss_table}] ORDER BY {order_col_ss}"
         )
         sf_sql = (
-            f'SELECT {sf_col_list} FROM "{sf_schema}"."{sf_table}" '
+            f'SELECT {sf_col_list} FROM "{sf_database}"."{sf_schema}"."{sf_table}" '
             f"ORDER BY {order_col_sf} LIMIT {int(sample_size)}"
         )
 
@@ -352,8 +355,11 @@ def parse_table_mapping(mapping: str) -> dict:
     """
     Parse a table mapping string.
 
-    Format: source_schema.source_table:target_schema.target_table
-    Example: dbo.Customers:PUBLIC.CUSTOMERS
+    Format: source_schema.source_table:target_database.target_schema.target_table
+    Examples:
+      dbo.Customers:PUBLIC.CUSTOMERS                         (uses --sf-database)
+      dbo.Customers:DW_DEV_BRONZE.HIST.HIST_TBL_PSG_GROUP_KEY  (overrides database)
+      dbo.Orders                                             (same name on both sides)
 
     If only one side is given (no colon), assumes same schema.table on both.
     """
@@ -362,16 +368,25 @@ def parse_table_mapping(mapping: str) -> dict:
     else:
         src = tgt = mapping
 
-    def _split(name):
+    def _split_source(name):
         parts = name.split(".", 1)
         if len(parts) == 2:
             return parts[0], parts[1]
-        return "dbo", parts[0]  # default schema
+        return "dbo", parts[0]
 
-    ss_schema, ss_table = _split(src)
-    sf_schema, sf_table = _split(tgt)
+    def _split_target(name):
+        parts = name.split(".")
+        if len(parts) == 3:
+            return parts[0], parts[1], parts[2]  # db.schema.table
+        if len(parts) == 2:
+            return None, parts[0], parts[1]       # schema.table
+        return None, "dbo", parts[0]              # table only
+
+    ss_schema, ss_table = _split_source(src)
+    sf_database, sf_schema, sf_table = _split_target(tgt)
     return {
         "ss_schema": ss_schema, "ss_table": ss_table,
+        "sf_database": sf_database,  # None means use --sf-database
         "sf_schema": sf_schema, "sf_table": sf_table,
     }
 
@@ -390,9 +405,11 @@ def build_parser() -> argparse.ArgumentParser:
         "tables", nargs="+",
         help=(
             "Table mapping(s) in the format:\n"
-            "  source_schema.source_table:target_schema.target_table\n"
+            "  source_schema.table:target_schema.table         (uses --sf-database)\n"
+            "  source_schema.table:target_db.target_schema.table  (overrides database)\n"
             "Examples:\n"
             "  dbo.Customers:PUBLIC.CUSTOMERS\n"
+            "  dbo.Customers:DW_DEV_BRONZE.HIST.HIST_CUSTOMERS\n"
             "  dbo.Orders  (same name assumed on both sides)"
         ),
     )
@@ -469,7 +486,9 @@ def run_validations(args) -> list[dict]:
 
     for mapping_str in args.tables:
         m = parse_table_mapping(mapping_str)
-        header = f"{m['ss_schema']}.{m['ss_table']} → {m['sf_schema']}.{m['sf_table']}"
+        # Use per-table database override if provided, otherwise fall back to --sf-database
+        sf_db = m["sf_database"] or args.sf_database
+        header = f"{m['ss_schema']}.{m['ss_table']} → {sf_db}.{m['sf_schema']}.{m['sf_table']}"
         print(f"\n{'='*60}")
         print(f"  Validating: {header}")
         print(f"{'='*60}")
@@ -478,7 +497,7 @@ def run_validations(args) -> list[dict]:
 
         # TC1: Table exists
         print("  Running TC1 - Table Exists...")
-        r1 = test_table_exists(sf_conn, m["sf_schema"], m["sf_table"])
+        r1 = test_table_exists(sf_conn, sf_db, m["sf_schema"], m["sf_table"])
         table_results.append(r1)
 
         if r1["status"] == "FAIL":
@@ -495,7 +514,7 @@ def run_validations(args) -> list[dict]:
             table_results.append(test_schema_match(
                 ss_conn, sf_conn,
                 m["ss_schema"], m["ss_table"],
-                m["sf_schema"], m["sf_table"],
+                sf_db, m["sf_schema"], m["sf_table"],
             ))
 
             # TC3: Record count
@@ -503,13 +522,13 @@ def run_validations(args) -> list[dict]:
             table_results.append(test_record_count(
                 ss_conn, sf_conn,
                 m["ss_schema"], m["ss_table"],
-                m["sf_schema"], m["sf_table"],
+                sf_db, m["sf_schema"], m["sf_table"],
             ))
 
             # TC4: Audit fields
             print("  Running TC4 - Audit Fields...")
             table_results.append(test_audit_fields(
-                sf_conn, m["sf_schema"], m["sf_table"],
+                sf_conn, sf_db, m["sf_schema"], m["sf_table"],
                 audit_fields=args.audit_fields,
             ))
 
@@ -518,7 +537,7 @@ def run_validations(args) -> list[dict]:
             table_results.append(test_data_validation(
                 ss_conn, sf_conn,
                 m["ss_schema"], m["ss_table"],
-                m["sf_schema"], m["sf_table"],
+                sf_db, m["sf_schema"], m["sf_table"],
                 mode=args.mode,
                 sample_size=args.sample_size,
             ))

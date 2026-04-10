@@ -229,8 +229,14 @@ def test_audit_fields(sf_conn, sf_database: str, sf_schema: str, sf_table: str,
     cols_df = _get_snowflake_columns(sf_conn, sf_database, sf_schema, sf_table)
     tgt_cols = set(cols_df["COLUMN_NAME"].str.upper())
 
-    candidates = [f.upper() for f in (audit_fields or COMMON_AUDIT_FIELDS)]
-    found = [c for c in candidates if c in tgt_cols]
+    if audit_fields:
+        # User-specified audit fields: exact match
+        found = [f.upper() for f in audit_fields if f.upper() in tgt_cols]
+    else:
+        # Auto-detect: columns matching COMMON_AUDIT_FIELDS or containing "AUDIT"
+        from_list = [f for f in COMMON_AUDIT_FIELDS if f in tgt_cols]
+        from_pattern = [c for c in tgt_cols if "AUDIT" in c and c not in from_list]
+        found = sorted(set(from_list + from_pattern))
 
     if not found:
         return {

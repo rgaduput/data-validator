@@ -350,12 +350,14 @@ def test_data_validation(ss_conn, sf_conn,
         }
 
     # Row-by-row, column-by-column comparison
+    key_col = common_cols[0]  # first column used as row identifier
     mismatched_rows = 0
     col_mismatch_count = {c: 0 for c in common_cols}  # per-column mismatch tally
     first_example = None  # capture first mismatch for the report
 
     for i in range(compare_rows):
         row_has_diff = False
+        row_key = src_df.iloc[i][key_col].strip()
         for col in common_cols:
             src_val = src_df.iloc[i][col].strip()
             tgt_val = tgt_df.iloc[i][col].strip()
@@ -364,7 +366,8 @@ def test_data_validation(ss_conn, sf_conn,
                 row_has_diff = True
                 if first_example is None:
                     first_example = {
-                        "row": i + 1,
+                        "key_col": key_col,
+                        "key_val": row_key if len(row_key) <= 50 else row_key[:50] + "...",
                         "column": col,
                         "source": src_val if len(src_val) <= 80 else src_val[:80] + "...",
                         "target": tgt_val if len(tgt_val) <= 80 else tgt_val[:80] + "...",
@@ -393,11 +396,12 @@ def test_data_validation(ss_conn, sf_conn,
         col_summary += f", ... +{len(diff_cols_sorted) - 5} more"
     details += f"\n    Columns with diffs: {col_summary}"
 
-    # Show first concrete example
+    # Show first concrete example with row identifier
     if first_example:
         ex = first_example
         details += (
-            f"\n    Example (row {ex['row']}, column {ex['column']}): "
+            f"\n    Example → {ex['key_col']}=[{ex['key_val']}], "
+            f"column [{ex['column']}]: "
             f"source=[{ex['source']}] vs target=[{ex['target']}]"
         )
 

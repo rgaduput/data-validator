@@ -305,11 +305,15 @@ def test_data_validation(ss_conn, sf_conn,
             "details": "No common columns found to compare",
         }
 
+    # Pick a row-identifier column: prefer columns with ID/KEY in the name
+    id_candidates = [c for c in common_cols if "ID" in c or "KEY" in c]
+    key_col = id_candidates[0] if id_candidates else common_cols[0]
+
     # Build column lists respecting each DB's quoting
     ss_col_list = ", ".join(f"[{c}]" for c in common_cols)
     sf_col_list = ", ".join(f'"{c}"' for c in common_cols)
-    order_col_ss = f"[{common_cols[0]}]"
-    order_col_sf = f'"{common_cols[0]}"'
+    order_col_ss = f"[{key_col}]"
+    order_col_sf = f'"{key_col}"'
 
     if mode == "full":
         ss_sql = f"SELECT {ss_col_list} FROM [{ss_schema}].[{ss_table}] ORDER BY {order_col_ss}"
@@ -350,7 +354,6 @@ def test_data_validation(ss_conn, sf_conn,
         }
 
     # Row-by-row, column-by-column comparison
-    key_col = common_cols[0]  # first column used as row identifier
     mismatched_rows = 0
     col_mismatch_count = {c: 0 for c in common_cols}  # per-column mismatch tally
     first_example = None  # capture first mismatch for the report
@@ -368,6 +371,7 @@ def test_data_validation(ss_conn, sf_conn,
                     first_example = {
                         "key_col": key_col,
                         "key_val": row_key if len(row_key) <= 50 else row_key[:50] + "...",
+                        "row_num": i + 1,
                         "column": col,
                         "source": src_val if len(src_val) <= 80 else src_val[:80] + "...",
                         "target": tgt_val if len(tgt_val) <= 80 else tgt_val[:80] + "...",
@@ -400,9 +404,8 @@ def test_data_validation(ss_conn, sf_conn,
     if first_example:
         ex = first_example
         details += (
-            f"\n    Example → {ex['key_col']}=[{ex['key_val']}], "
-            f"column [{ex['column']}]: "
-            f"source=[{ex['source']}] vs target=[{ex['target']}]"
+            f"\n    First mismatch → row #{ex['row_num']} where {ex['key_col']}=[{ex['key_val']}]"
+            f"\n      column [{ex['column']}]: source=[{ex['source']}] vs target=[{ex['target']}]"
         )
 
     return {
